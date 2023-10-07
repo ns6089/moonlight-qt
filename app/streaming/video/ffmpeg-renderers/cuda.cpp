@@ -1,5 +1,224 @@
 #include "cuda.h"
 
+#ifdef _WIN32
+
+CUDADecoderD3D11Interop::CUDADecoderD3D11Interop()
+    : m_Funcs(nullptr),
+    m_Device(0),
+    m_PrimaryContext(0),
+    m_Resource(nullptr)
+{
+    // One-time init of CUDA library
+    cuda_load_functions(&m_Funcs, nullptr);
+    if (m_Funcs == nullptr) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to initialize CUDA library");
+        return;
+    }
+}
+
+CUDADecoderD3D11Interop::~CUDADecoderD3D11Interop()
+{
+    int err;
+
+    unregisterTexture();
+
+    if (m_PrimaryContext != 0) {
+        err = m_Funcs->cuDevicePrimaryCtxRelease(m_Device);
+        if (err != CUDA_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to release primary CUDA context");
+        }
+    }
+
+    if (m_Funcs != nullptr) {
+        cuda_free_functions(&m_Funcs);
+    }
+}
+
+bool CUDADecoderD3D11Interop::initCudaContext(IDXGIAdapter* adapter){
+    int err;
+
+    if (m_PrimaryContext != 0) {
+        // Already initialized
+        return false;
+    }
+
+    if (m_Funcs == nullptr) {
+        // CUDA not loaded
+        return false;
+    }
+
+    err = m_Funcs->cuInit(0);
+    if (err != CUDA_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuInit() failed: %d", err);
+        return false;
+    }
+
+    err = m_Funcs->cuD3D11GetDevice(&m_Device, adapter);
+    if (err != CUDA_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuD3D11GetDevice() failed: %d", err);
+        return false;
+    }
+
+    err = m_Funcs->cuDevicePrimaryCtxSetFlags(m_Device, CU_CTX_SCHED_BLOCKING_SYNC);
+    if (err != CUDA_SUCCESS) {
+        // Not fatal
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuDevicePrimaryCtxSetFlags() failed: %d", err);
+    }
+
+    err = m_Funcs->cuDevicePrimaryCtxRetain(&m_PrimaryContext, m_Device);
+    if (err != CUDA_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuDevicePrimaryCtxRetain() failed: %d", err);
+        return false;
+    }
+
+    return true;
+}
+
+CUcontext CUDADecoderD3D11Interop::getCudaContext() {
+    return m_PrimaryContext;
+}
+
+bool CUDADecoderD3D11Interop::registerTexture(ID3D11Resource* texture)
+{
+    int err;
+
+    if (m_Resource != 0) {
+        // Already registered
+        return false;
+    }
+
+    if (m_Funcs == nullptr) {
+        // Already logged in constructor
+        return false;
+    }
+
+    // Push FFmpeg's CUDA context to use for our CUDA operations
+    err = m_Funcs->cuCtxPushCurrent(m_PrimaryContext);
+    if (err != CUDA_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuCtxPushCurrent() failed: %d", err);
+        return false;
+    }
+
+    // Register it with CUDA
+    err = m_Funcs->cuGraphicsD3D11RegisterResource(&m_Resource, texture, CU_GRAPHICS_REGISTER_FLAGS_NONE);
+
+    if (err != CUDA_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuGraphicsD3D11RegisterResource() failed: %d", err);
+        m_Resource = 0;
+    }
+
+    {
+        CUcontext dummy;
+        m_Funcs->cuCtxPopCurrent(&dummy);
+    }
+
+    return err == CUDA_SUCCESS;
+}
+
+void CUDADecoderD3D11Interop::unregisterTexture()
+{
+    int err;
+
+    if (m_Resource == 0) {
+        // Nothing to unregister
+        return;
+    }
+
+    if (m_Funcs == nullptr) {
+        // Already logged in constructor
+        return;
+    }
+
+    // Push FFmpeg's CUDA context to use for our CUDA operations
+    err = m_Funcs->cuCtxPushCurrent(m_PrimaryContext);
+    if (err != CUDA_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuCtxPushCurrent() failed: %d", err);
+        return;
+    }
+
+    m_Funcs->cuGraphicsUnregisterResource(m_Resource);
+    m_Resource = 0;
+
+    {
+        CUcontext dummy;
+        m_Funcs->cuCtxPopCurrent(&dummy);
+    }
+}
+
+bool CUDADecoderD3D11Interop::copyCudaFrameToTexture(AVFrame* frame)
+{
+    int err;
+
+    if (m_Resource == 0) {
+        // Texture not registered
+        return false;
+    }
+
+    if (m_Funcs == nullptr) {
+        // Already logged in constructor
+        return false;
+    }
+
+    // Push FFmpeg's CUDA context to use for our CUDA operations
+    err = m_Funcs->cuCtxPushCurrent(m_PrimaryContext);
+    if (err != CUDA_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuCtxPushCurrent() failed: %d", err);
+        return false;
+    }
+
+    // Map our resource
+    err = m_Funcs->cuGraphicsMapResources(1, &m_Resource, 0);
+    if (err != CUDA_SUCCESS) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuGraphicsMapResources() failed: %d", err);
+        goto PopCtxExit;
+    }
+
+    {
+        CUarray cudaArray;
+
+        // Get a pointer to the mapped array for this plane
+        err = m_Funcs->cuGraphicsSubResourceGetMappedArray(&cudaArray, m_Resource, 0, 0);
+        if (err != CUDA_SUCCESS) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuGraphicsSubResourceGetMappedArray() failed: %d", err);
+            goto UnmapExit;
+        }
+
+        // TODO: try to do this in one copy, planes seem to be aligned to 32px vertically
+        for (int i = 0; i < 3; i++) {
+            CUDA_MEMCPY2D cu2d = {};
+            cu2d.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+            cu2d.srcDevice = (CUdeviceptr)frame->data[i];
+            cu2d.srcPitch = (size_t)frame->linesize[i];
+            cu2d.dstY = (size_t)frame->height * i;
+            cu2d.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+            cu2d.dstArray = cudaArray;
+            cu2d.WidthInBytes = (size_t)frame->width * 2; // TODO: 16-bit
+            cu2d.Height = (size_t)frame->height;
+
+            // Do the copy
+            err = m_Funcs->cuMemcpy2D(&cu2d);
+            if (err != CUDA_SUCCESS) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "cuMemcpy2D() failed: %d", err);
+                goto UnmapExit;
+            }
+        }
+    }
+
+UnmapExit:
+    m_Funcs->cuGraphicsUnmapResources(1, &m_Resource, 0);
+
+PopCtxExit:
+    {
+        CUcontext dummy;
+        m_Funcs->cuCtxPopCurrent(&dummy);
+    }
+
+    return err == CUDA_SUCCESS;
+}
+
+#else
+// !_WIN32
+
 #include <SDL_opengl.h>
 
 CUDARenderer::CUDARenderer()
@@ -217,3 +436,5 @@ PopCtxExit:
     }
     return err == CUDA_SUCCESS;
 }
+
+#endif // !_WIN32

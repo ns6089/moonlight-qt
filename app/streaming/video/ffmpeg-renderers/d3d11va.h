@@ -10,10 +10,12 @@ extern "C" {
 #include <libavutil/hwcontext_d3d11va.h>
 }
 
+#include "cuda.h"
+
 class D3D11VARenderer : public IFFmpegRenderer
 {
 public:
-    D3D11VARenderer(int decoderSelectionPass);
+    D3D11VARenderer(int decoderSelectionPass, bool useCudaDecoder = false);
     virtual ~D3D11VARenderer() override;
     virtual bool initialize(PDECODER_PARAMETERS params) override;
     virtual bool prepareDecoderContext(AVCodecContext* context, AVDictionary**) override;
@@ -41,6 +43,8 @@ private:
 
     IDXGIFactory5* m_Factory;
     ID3D11Device* m_Device;
+    IDXGIAdapter1* m_Adapter;
+    DXGI_ADAPTER_DESC1 m_AdapterDesc;
     IDXGISwapChain4* m_SwapChain;
     ID3D11DeviceContext* m_DeviceContext;
     ID3D11RenderTargetView* m_RenderTargetView;
@@ -55,9 +59,14 @@ private:
 
     bool m_AllowTearing;
 
+    ID3D11VertexShader* m_VideoVertexShader;
+    ID3D11VertexShader* m_VideoVertexShaderYUV444;
     ID3D11PixelShader* m_VideoGenericPixelShader;
+    ID3D11PixelShader* m_VideoGenericPixelShaderYUV444;
     ID3D11PixelShader* m_VideoBt601LimPixelShader;
+    ID3D11PixelShader* m_VideoBt601LimPixelShaderYUV444;
     ID3D11PixelShader* m_VideoBt2020LimPixelShader;
+    ID3D11PixelShader* m_VideoBt2020LimPixelShaderYUV444;
     ID3D11Buffer* m_VideoVertexBuffer;
 
     ID3D11Texture2D* m_VideoTexture;
@@ -71,5 +80,7 @@ private:
 
     AVBufferRef* m_HwDeviceContext;
     AVBufferRef* m_HwFramesContext;
+    
+    CUDADecoderD3D11Interop* m_CUDADecoderD3D11Interop;
 };
 

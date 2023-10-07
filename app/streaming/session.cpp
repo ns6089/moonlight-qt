@@ -467,7 +467,15 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     IVideoDecoder* decoder;
 
     int videoFormat;
-    if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10) {
+    if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT8_444) {
+        // TODO: add the remaining yuv444 formats
+        videoFormat = VIDEO_FORMAT_H265_REXT8_444;
+    }
+    else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT10_444) {
+        // TODO: add the remaining yuv444 formats
+        videoFormat = VIDEO_FORMAT_H265_REXT10_444;
+    }
+    else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10) {
         videoFormat = VIDEO_FORMAT_AV1_MAIN10;
     }
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN8) {
@@ -598,8 +606,6 @@ bool Session::initialize()
     m_StreamConfig.height = m_Preferences->height;
     m_StreamConfig.fps = m_Preferences->fps;
     m_StreamConfig.bitrate = m_Preferences->bitrateKbps;
-    m_StreamConfig.hevcBitratePercentageMultiplier = 75;
-    m_StreamConfig.av1BitratePercentageMultiplier = 65;
 
 #ifndef STEAM_LINK
     // Enable audio encryption as long as we're not on Steam Link.
@@ -670,13 +676,30 @@ bool Session::initialize()
 #endif
 
         // TODO: Determine if HEVC is better depending on the decoder
-        if (m_Preferences->enableHdr && isHardwareDecodeAvailable(testWindow,
+        if (m_Preferences->enableHdr &&
+            m_Preferences->enableYUV444 && isHardwareDecodeAvailable(testWindow,
+                                                                     m_Preferences->videoDecoderSelection,
+                                                                     VIDEO_FORMAT_H265_REXT10_444,
+                                                                     m_StreamConfig.width,
+                                                                     m_StreamConfig.height,
+                                                                     m_StreamConfig.fps)) {
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265 | VIDEO_FORMAT_H265_MAIN10 | VIDEO_FORMAT_H265_REXT8_444| VIDEO_FORMAT_H265_REXT10_444;
+        }
+        else if (m_Preferences->enableHdr && isHardwareDecodeAvailable(testWindow,
                                                                   m_Preferences->videoDecoderSelection,
                                                                   VIDEO_FORMAT_H265_MAIN10,
                                                                   m_StreamConfig.width,
                                                                   m_StreamConfig.height,
                                                                   m_StreamConfig.fps)) {
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265 | VIDEO_FORMAT_H265_MAIN10;
+        }
+        else if (m_Preferences->enableYUV444 && isHardwareDecodeAvailable(testWindow,
+                                                                          m_Preferences->videoDecoderSelection,
+                                                                          VIDEO_FORMAT_H265_REXT8_444,
+                                                                          m_StreamConfig.width,
+                                                                          m_StreamConfig.height,
+                                                                          m_StreamConfig.fps)) {
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265 | VIDEO_FORMAT_H265_REXT8_444;
         }
         else if (isHardwareDecodeAvailable(testWindow,
                                            m_Preferences->videoDecoderSelection,
@@ -705,18 +728,33 @@ bool Session::initialize()
 #endif
         break;
     case StreamingPreferences::VCC_FORCE_H264:
+        if (m_Preferences->enableYUV444) {
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H264_HIGH8_444;
+        }
         break;
     case StreamingPreferences::VCC_FORCE_HEVC:
     case StreamingPreferences::VCC_FORCE_HEVC_HDR_DEPRECATED:
         m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265;
         if (m_Preferences->enableHdr) {
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
+            if (m_Preferences->enableYUV444) {
+                m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_REXT10_444;
+            }
+        }
+        if (m_Preferences->enableYUV444) {
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_REXT8_444;
         }
         break;
     case StreamingPreferences::VCC_FORCE_AV1:
         m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN8;
         if (m_Preferences->enableHdr) {
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10;
+            if (m_Preferences->enableYUV444) {
+                m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_HIGH10_444;
+            }
+        }
+        if (m_Preferences->enableYUV444) {
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_HIGH8_444;
         }
         break;
     }
@@ -822,6 +860,12 @@ bool Session::validateLaunch(SDL_Window* testWindow)
             if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10) {
                 m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
             }
+            if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH8_444) {
+                m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_REXT8_444;
+            }
+            if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444) {
+                m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_REXT10_444;
+            }
 
             // Moonlight-common-c will handle this case already, but we want
             // to set this explicitly here so we can do our hardware acceleration
@@ -892,6 +936,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
     }
 
     if (m_Preferences->enableHdr) {
+        // TODO: decide what to do with yuv444 here
         // Check that the server GPU supports HDR
         if (!(m_Computer->serverCodecModeSupport & SCM_MASK_10BIT)) {
             emitLaunchWarning(tr("Your host PC doesn't support HDR streaming."));

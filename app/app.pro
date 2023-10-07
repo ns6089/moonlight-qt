@@ -139,7 +139,7 @@ unix:!macx {
 }
 win32 {
     LIBS += -llibssl -llibcrypto -lSDL2 -lSDL2_ttf -lavcodec -lavutil -lopus -ldxgi -ld3d11
-    CONFIG += ffmpeg
+    CONFIG += ffmpeg cuda
 }
 win32:!winrt {
     CONFIG += soundio discord-rpc

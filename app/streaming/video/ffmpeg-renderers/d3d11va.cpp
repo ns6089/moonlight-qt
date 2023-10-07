@@ -73,25 +73,32 @@ typedef struct _CSC_CONST_BUF
 } CSC_CONST_BUF, *PCSC_CONST_BUF;
 static_assert(sizeof(CSC_CONST_BUF) % 16 == 0, "Constant buffer sizes must be a multiple of 16");
 
-D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass)
+D3D11VARenderer::D3D11VARenderer(int decoderSelectionPass, bool useCudaDecoder/* = false*/)
     : m_DecoderSelectionPass(decoderSelectionPass),
       m_Factory(nullptr),
       m_Device(nullptr),
+      m_Adapter(nullptr),
       m_SwapChain(nullptr),
       m_DeviceContext(nullptr),
       m_RenderTargetView(nullptr),
       m_LastColorSpace(-1),
       m_LastFullRange(false),
       m_AllowTearing(false),
+      m_VideoVertexShader(nullptr),
+      m_VideoVertexShaderYUV444(nullptr),
       m_VideoGenericPixelShader(nullptr),
+      m_VideoGenericPixelShaderYUV444(nullptr),
       m_VideoBt601LimPixelShader(nullptr),
+      m_VideoBt601LimPixelShaderYUV444(nullptr),
       m_VideoBt2020LimPixelShader(nullptr),
+      m_VideoBt2020LimPixelShaderYUV444(nullptr),
       m_VideoVertexBuffer(nullptr),
       m_VideoTexture(nullptr),
       m_OverlayLock(0),
       m_OverlayPixelShader(nullptr),
       m_HwDeviceContext(nullptr),
-      m_HwFramesContext(nullptr)
+      m_HwFramesContext(nullptr),
+    m_CUDADecoderD3D11Interop(useCudaDecoder ? new CUDADecoderD3D11Interop() : nullptr)
 {
     RtlZeroMemory(m_OverlayVertexBuffers, sizeof(m_OverlayVertexBuffers));
     RtlZeroMemory(m_OverlayTextures, sizeof(m_OverlayTextures));
@@ -109,10 +116,15 @@ D3D11VARenderer::~D3D11VARenderer()
 
     SDL_DestroyMutex(m_ContextLock);
 
+    SAFE_COM_RELEASE(m_VideoVertexShader);
+    SAFE_COM_RELEASE(m_VideoVertexShaderYUV444);
     SAFE_COM_RELEASE(m_VideoVertexBuffer);
     SAFE_COM_RELEASE(m_VideoBt2020LimPixelShader);
+    SAFE_COM_RELEASE(m_VideoBt2020LimPixelShaderYUV444);
     SAFE_COM_RELEASE(m_VideoBt601LimPixelShader);
+    SAFE_COM_RELEASE(m_VideoBt601LimPixelShaderYUV444);
     SAFE_COM_RELEASE(m_VideoGenericPixelShader);
+    SAFE_COM_RELEASE(m_VideoGenericPixelShaderYUV444);
 
     for (int i = 0; i < ARRAYSIZE(m_VideoTextureResourceViews); i++) {
         SAFE_COM_RELEASE(m_VideoTextureResourceViews[i]);
@@ -148,13 +160,16 @@ D3D11VARenderer::~D3D11VARenderer()
     }
 
     if (m_HwDeviceContext != nullptr) {
-        // This will release m_Device and m_DeviceContext too
         av_buffer_unref(&m_HwDeviceContext);
     }
-    else {
-        SAFE_COM_RELEASE(m_Device);
-        SAFE_COM_RELEASE(m_DeviceContext);
+
+    if (m_CUDADecoderD3D11Interop != nullptr) {
+        delete m_CUDADecoderD3D11Interop;
     }
+
+    SAFE_COM_RELEASE(m_Device);
+    SAFE_COM_RELEASE(m_DeviceContext);
+    SAFE_COM_RELEASE(m_Adapter);
 
     SAFE_COM_RELEASE(m_Factory);
 }
@@ -162,14 +177,12 @@ D3D11VARenderer::~D3D11VARenderer()
 bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapterNotFound)
 {
     bool success = false;
-    IDXGIAdapter1* adapter = nullptr;
-    DXGI_ADAPTER_DESC1 adapterDesc;
     HRESULT hr;
 
     SDL_assert(m_Device == nullptr);
     SDL_assert(m_DeviceContext == nullptr);
 
-    hr = m_Factory->EnumAdapters1(adapterIndex, &adapter);
+    hr = m_Factory->EnumAdapters1(adapterIndex, &m_Adapter);
     if (hr == DXGI_ERROR_NOT_FOUND) {
         // Expected at the end of enumeration
         goto Exit;
@@ -181,7 +194,7 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
         goto Exit;
     }
 
-    hr = adapter->GetDesc1(&adapterDesc);
+    hr = m_Adapter->GetDesc1(&m_AdapterDesc);
     if (FAILED(hr)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "IDXGIAdapter::GetDesc() failed: %x",
@@ -189,7 +202,7 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
         goto Exit;
     }
 
-    if (adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+    if (m_AdapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
         // Skip the WARP device. We know it will fail.
         goto Exit;
     }
@@ -197,11 +210,11 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Detected GPU %d: %S (%x:%x)",
                 adapterIndex,
-                adapterDesc.Description,
-                adapterDesc.VendorId,
-                adapterDesc.DeviceId);
+                m_AdapterDesc.Description,
+                m_AdapterDesc.VendorId,
+                m_AdapterDesc.DeviceId);
 
-    hr = D3D11CreateDevice(adapter,
+    hr = D3D11CreateDevice(m_Adapter,
                            D3D_DRIVER_TYPE_UNKNOWN,
                            nullptr,
                            D3D11_CREATE_DEVICE_VIDEO_SUPPORT
@@ -222,7 +235,7 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
         goto Exit;
     }
 
-    if (!checkDecoderSupport(adapter)) {
+    if (!checkDecoderSupport(m_Adapter)) {
         m_DeviceContext->Release();
         m_DeviceContext = nullptr;
         m_Device->Release();
@@ -235,9 +248,12 @@ bool D3D11VARenderer::createDeviceByAdapterIndex(int adapterIndex, bool* adapter
 
 Exit:
     if (adapterNotFound != nullptr) {
-        *adapterNotFound = (adapter == nullptr);
+        *adapterNotFound = (m_Adapter == nullptr);
     }
-    SAFE_COM_RELEASE(adapter);
+    if (!success) {
+        SAFE_COM_RELEASE(m_Adapter);
+        m_Adapter = nullptr;
+    }
     return success;
 }
 
@@ -247,6 +263,7 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
     HRESULT hr;
 
     m_DecoderParams = *params;
+
 
     if (qgetenv("D3D11VA_ENABLED") == "0") {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -300,6 +317,13 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
             SDL_assert(m_DeviceContext == nullptr);
             return false;
         }
+    }
+
+    // TODO: do this more gracefully?
+    if (m_AdapterDesc.VendorId == 0x10DE &&
+            (params->videoFormat & VIDEO_FORMAT_MASK_YUV444) &&
+        !m_CUDADecoderD3D11Interop) {
+        return false;
     }
 
     DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
@@ -429,7 +453,35 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         return false;
     }
 
-    {
+    if (m_CUDADecoderD3D11Interop) {
+        m_HwDeviceContext = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_CUDA);
+        if (!m_HwDeviceContext) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Failed to allocate CUDA device context");
+            return false;
+        }
+
+        AVHWDeviceContext* deviceContext = (AVHWDeviceContext*)m_HwDeviceContext->data;
+        AVCUDADeviceContext* cudaDeviceContext = (AVCUDADeviceContext *)deviceContext->hwctx;
+
+        if (!m_CUDADecoderD3D11Interop->initCudaContext(m_Adapter)) {
+            // TODO: log message
+            return false;
+        }
+
+        cudaDeviceContext->cuda_ctx = m_CUDADecoderD3D11Interop->getCudaContext();
+
+        // TODO: set lock functions?
+
+        int err = av_hwdevice_ctx_init(m_HwDeviceContext);
+        if (err < 0) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "Failed to initialize D3D11VA device context: %d",
+                         err);
+            return false;
+        }
+    }
+    else {
         m_HwDeviceContext = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
         if (!m_HwDeviceContext) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -440,9 +492,10 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
         AVHWDeviceContext* deviceContext = (AVHWDeviceContext*)m_HwDeviceContext->data;
         AVD3D11VADeviceContext* d3d11vaDeviceContext = (AVD3D11VADeviceContext*)deviceContext->hwctx;
 
-        // AVHWDeviceContext takes ownership of these objects
         d3d11vaDeviceContext->device = m_Device;
+        m_Device->AddRef();
         d3d11vaDeviceContext->device_context = m_DeviceContext;
+        m_DeviceContext->AddRef();
 
         // Set lock functions that we will use to synchronize with FFmpeg's usage of our device context
         d3d11vaDeviceContext->lock = lockContext;
@@ -456,9 +509,7 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
                          err);
             return false;
         }
-    }
 
-    {
         m_HwFramesContext = av_hwframe_ctx_alloc(m_HwDeviceContext);
         if (!m_HwFramesContext) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -483,18 +534,18 @@ bool D3D11VARenderer::initialize(PDECODER_PARAMETERS params)
 
         d3d11vaFramesContext->BindFlags = D3D11_BIND_DECODER;
 
-        int err = av_hwframe_ctx_init(m_HwFramesContext);
+        err = av_hwframe_ctx_init(m_HwFramesContext);
         if (err < 0) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Failed to initialize D3D11VA frame context: %d",
                          err);
             return false;
         }
+    }
 
-        // Create our video texture and SRVs
-        if (!setupVideoTexture()) {
-            return false;
-        }
+    // Create our video texture and SRVs
+    if (!setupVideoTexture()) {
+        return false;
     }
 
     return true;
@@ -512,8 +563,10 @@ bool D3D11VARenderer::prepareDecoderContext(AVCodecContext* context, AVDictionar
 
 bool D3D11VARenderer::prepareDecoderContextInGetFormat(AVCodecContext *context, AVPixelFormat)
 {
-    // hw_frames_ctx must be initialized in ffGetFormat().
-    context->hw_frames_ctx = av_buffer_ref(m_HwFramesContext);
+    if (!m_CUDADecoderD3D11Interop) {
+        // hw_frames_ctx must be initialized in ffGetFormat().
+        context->hw_frames_ctx = av_buffer_ref(m_HwFramesContext);
+    }
 
     return true;
 }
@@ -677,6 +730,9 @@ void D3D11VARenderer::renderOverlay(Overlay::OverlayType type)
 
     SDL_AtomicUnlock(&m_OverlayLock);
 
+    // Bind vertex shader
+    m_DeviceContext->VSSetShader(m_VideoVertexShader, nullptr, 0);
+
     // Bind vertex buffer
     UINT stride = sizeof(VERTEX);
     UINT offset = 0;
@@ -698,17 +754,18 @@ void D3D11VARenderer::bindColorConversion(AVFrame* frame)
 {
     bool fullRange = isFrameFullRange(frame);
     int colorspace = getFrameColorspace(frame);
+    bool yuv444 = m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_YUV444;
 
     // We have purpose-built shaders for the common Rec 601 (SDR) and Rec 2020 (HDR) cases
     if (!fullRange && colorspace == COLORSPACE_REC_601) {
-        m_DeviceContext->PSSetShader(m_VideoBt601LimPixelShader, nullptr, 0);
+        m_DeviceContext->PSSetShader(yuv444 ? m_VideoBt601LimPixelShaderYUV444 : m_VideoBt601LimPixelShader, nullptr, 0);
     }
     else if (!fullRange && colorspace == COLORSPACE_REC_2020) {
-        m_DeviceContext->PSSetShader(m_VideoBt2020LimPixelShader, nullptr, 0);
+        m_DeviceContext->PSSetShader(yuv444 ? m_VideoBt2020LimPixelShaderYUV444 : m_VideoBt2020LimPixelShader, nullptr, 0);
     }
     else {
         // We'll need to use the generic shader for this colorspace and color range combo
-        m_DeviceContext->PSSetShader(m_VideoGenericPixelShader, nullptr, 0);
+        m_DeviceContext->PSSetShader(yuv444 ? m_VideoGenericPixelShaderYUV444 : m_VideoGenericPixelShader, nullptr, 0);
 
         // If nothing has changed since last frame, we're done
         if (colorspace == m_LastColorSpace && fullRange == m_LastFullRange) {
@@ -781,20 +838,33 @@ void D3D11VARenderer::bindColorConversion(AVFrame* frame)
 
 void D3D11VARenderer::renderVideo(AVFrame* frame)
 {
+    // Bind vertex shader
+    if (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_YUV444) {
+        m_DeviceContext->VSSetShader(m_VideoVertexShaderYUV444, nullptr, 0);
+    }
+    else {
+        m_DeviceContext->VSSetShader(m_VideoVertexShader, nullptr, 0);
+    }
+
     // Bind video rendering vertex buffer
     UINT stride = sizeof(VERTEX);
     UINT offset = 0;
     m_DeviceContext->IASetVertexBuffers(0, 1, &m_VideoVertexBuffer, &stride, &offset);
 
     // Copy this frame (minus alignment padding) into our video texture
-    D3D11_BOX srcBox;
-    srcBox.left = 0;
-    srcBox.top = 0;
-    srcBox.right = m_DecoderParams.width;
-    srcBox.bottom = m_DecoderParams.height;
-    srcBox.front = 0;
-    srcBox.back = 1;
-    m_DeviceContext->CopySubresourceRegion(m_VideoTexture, 0, 0, 0, 0, (ID3D11Resource*)frame->data[0], (int)(intptr_t)frame->data[1], &srcBox);
+    if (frame->format == AV_PIX_FMT_CUDA) {
+        m_CUDADecoderD3D11Interop->copyCudaFrameToTexture(frame);
+    }
+    else {
+        D3D11_BOX srcBox;
+        srcBox.left = 0;
+        srcBox.top = 0;
+        srcBox.right = m_DecoderParams.width;
+        srcBox.bottom = m_DecoderParams.height;
+        srcBox.front = 0;
+        srcBox.back = 1;
+        m_DeviceContext->CopySubresourceRegion(m_VideoTexture, 0, 0, 0, 0, (ID3D11Resource*)frame->data[0], (int)(intptr_t)frame->data[1], &srcBox);
+    }
 
     // Bind our CSC shader (and constant buffer, if required)
     bindColorConversion(frame);
@@ -1004,6 +1074,11 @@ bool D3D11VARenderer::checkDecoderSupport(IDXGIAdapter* adapter)
         }
         break;
 
+    case VIDEO_FORMAT_H265_REXT8_444:
+    case VIDEO_FORMAT_H265_REXT10_444:
+        // TODO: check properly
+        break;
+
     case VIDEO_FORMAT_AV1_MAIN8:
         if (FAILED(videoDevice->CheckVideoDecoderFormat(&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, DXGI_FORMAT_NV12, &supported))) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -1114,23 +1189,18 @@ bool D3D11VARenderer::setupRenderingResources()
 
     m_DeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    // We use a common vertex shader for all pixel shaders
     {
         QByteArray vertexShaderBytecode = Path::readDataFile("d3d11_vertex.fxc");
 
-        ID3D11VertexShader* vertexShader;
-        hr = m_Device->CreateVertexShader(vertexShaderBytecode.constData(), vertexShaderBytecode.length(), nullptr, &vertexShader);
-        if (SUCCEEDED(hr)) {
-            m_DeviceContext->VSSetShader(vertexShader, nullptr, 0);
-            vertexShader->Release();
-        }
-        else {
+        hr = m_Device->CreateVertexShader(vertexShaderBytecode.constData(), vertexShaderBytecode.length(), nullptr, &m_VideoVertexShader);
+        if (FAILED(hr)) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "ID3D11Device::CreateVertexShader() failed: %x",
                          hr);
             return false;
         }
 
+        // We use a common input layout for all vertex shaders
         const D3D11_INPUT_ELEMENT_DESC vertexDesc[] =
         {
             { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -1145,6 +1215,18 @@ bool D3D11VARenderer::setupRenderingResources()
         else {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "ID3D11Device::CreateInputLayout() failed: %x",
+                         hr);
+            return false;
+        }
+    }
+
+    {
+        QByteArray vertexShaderBytecode = Path::readDataFile("d3d11_vertex_yuv444.fxc");
+
+        hr = m_Device->CreateVertexShader(vertexShaderBytecode.constData(), vertexShaderBytecode.length(), nullptr, &m_VideoVertexShaderYUV444);
+        if (FAILED(hr)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreateVertexShader() failed: %x",
                          hr);
             return false;
         }
@@ -1175,6 +1257,18 @@ bool D3D11VARenderer::setupRenderingResources()
     }
 
     {
+        QByteArray videoPixelShaderBytecode = Path::readDataFile("d3d11_genyuv_pixel_yuv444.fxc");
+
+        hr = m_Device->CreatePixelShader(videoPixelShaderBytecode.constData(), videoPixelShaderBytecode.length(), nullptr, &m_VideoGenericPixelShaderYUV444);
+        if (FAILED(hr)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreatePixelShader() failed: %x",
+                         hr);
+            return false;
+        }
+    }
+
+    {
         QByteArray videoPixelShaderBytecode = Path::readDataFile("d3d11_bt601lim_pixel.fxc");
 
         hr = m_Device->CreatePixelShader(videoPixelShaderBytecode.constData(), videoPixelShaderBytecode.length(), nullptr, &m_VideoBt601LimPixelShader);
@@ -1187,9 +1281,33 @@ bool D3D11VARenderer::setupRenderingResources()
     }
 
     {
+        QByteArray videoPixelShaderBytecode = Path::readDataFile("d3d11_bt601lim_pixel_yuv444.fxc");
+
+        hr = m_Device->CreatePixelShader(videoPixelShaderBytecode.constData(), videoPixelShaderBytecode.length(), nullptr, &m_VideoBt601LimPixelShaderYUV444);
+        if (FAILED(hr)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreatePixelShader() failed: %x",
+                         hr);
+            return false;
+        }
+    }
+
+    {
         QByteArray videoPixelShaderBytecode = Path::readDataFile("d3d11_bt2020lim_pixel.fxc");
 
         hr = m_Device->CreatePixelShader(videoPixelShaderBytecode.constData(), videoPixelShaderBytecode.length(), nullptr, &m_VideoBt2020LimPixelShader);
+        if (FAILED(hr)) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreatePixelShader() failed: %x",
+                         hr);
+            return false;
+        }
+    }
+
+    {
+        QByteArray videoPixelShaderBytecode = Path::readDataFile("d3d11_bt2020lim_pixel_yuv444.fxc");
+
+        hr = m_Device->CreatePixelShader(videoPixelShaderBytecode.constData(), videoPixelShaderBytecode.length(), nullptr, &m_VideoBt2020LimPixelShaderYUV444);
         if (FAILED(hr)) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "ID3D11Device::CreatePixelShader() failed: %x",
@@ -1371,9 +1489,19 @@ bool D3D11VARenderer::setupVideoTexture()
 
     texDesc.Width = m_DecoderParams.width;
     texDesc.Height = m_DecoderParams.height;
+    if (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_YUV444) {
+        // Planar YUV444
+        texDesc.Height *= 3;
+    }
     texDesc.MipLevels = 1;
     texDesc.ArraySize = 1;
-    texDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    if (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_YUV444) {
+        // TODO: make sure _UNORM doesn't affect the performqnce of cuda copy
+        texDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+    }
+    else {
+        texDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
+    }
     texDesc.SampleDesc.Quality = 0;
     texDesc.SampleDesc.Count = 1;
     texDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -1390,29 +1518,51 @@ bool D3D11VARenderer::setupVideoTexture()
         return false;
     }
 
-    // Create luminance and chrominance SRVs for each plane of the texture
+    if (m_CUDADecoderD3D11Interop) {
+        if (!m_CUDADecoderD3D11Interop->registerTexture(m_VideoTexture)) {
+            // TODO: error message
+            return false;
+        }
+    }
+
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
     srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Texture2D.MostDetailedMip = 0;
     srvDesc.Texture2D.MipLevels = 1;
-    srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
-    hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[0]);
-    if (FAILED(hr)) {
-        m_VideoTextureResourceViews[0] = nullptr;
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "ID3D11Device::CreateShaderResourceView() failed: %x",
-                     hr);
-        return false;
-    }
 
-    srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
-    hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[1]);
-    if (FAILED(hr)) {
-        m_VideoTextureResourceViews[1] = nullptr;
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "ID3D11Device::CreateShaderResourceView() failed: %x",
-                     hr);
-        return false;
+    if (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_YUV444) {
+        // Create SRV for planar YUV444
+        srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+        hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[0]);
+        if (FAILED(hr)) {
+            m_VideoTextureResourceViews[0] = nullptr;
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreateShaderResourceView() failed: %x",
+                         hr);
+            return false;
+        }
+    }
+    else {
+        // Create luminance and chrominance SRVs for each plane of the texture
+        srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+        hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[0]);
+        if (FAILED(hr)) {
+            m_VideoTextureResourceViews[0] = nullptr;
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreateShaderResourceView() failed: %x",
+                         hr);
+            return false;
+        }
+
+        srvDesc.Format = (m_DecoderParams.videoFormat & VIDEO_FORMAT_MASK_10BIT) ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R8G8_UNORM;
+        hr = m_Device->CreateShaderResourceView(m_VideoTexture, &srvDesc, &m_VideoTextureResourceViews[1]);
+        if (FAILED(hr)) {
+            m_VideoTextureResourceViews[1] = nullptr;
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                         "ID3D11Device::CreateShaderResourceView() failed: %x",
+                         hr);
+            return false;
+        }
     }
 
     return true;

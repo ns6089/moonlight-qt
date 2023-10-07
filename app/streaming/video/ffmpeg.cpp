@@ -467,6 +467,13 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, PDECODER
             m_Pkt->data = (uint8_t*)k_AV1Main10TestFrame;
             m_Pkt->size = sizeof(k_AV1Main10TestFrame);
             break;
+        case VIDEO_FORMAT_H264_HIGH8_444:
+        case VIDEO_FORMAT_H265_REXT8_444:
+        case VIDEO_FORMAT_H265_REXT10_444:
+        case VIDEO_FORMAT_AV1_HIGH8_444:
+        case VIDEO_FORMAT_AV1_HIGH10_444:
+            // TODO: properly test decoders
+            return true;
         default:
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "No test frame for format: %x",
@@ -789,6 +796,12 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
     else if (pass == 1) {
         switch (hwDecodeCfg->device_type) {
 #ifdef HAVE_CUDA
+#ifdef Q_OS_WIN32
+        // TODO: document this
+        case AV_HWDEVICE_TYPE_CUDA:
+            return new D3D11VARenderer(pass, true);
+#endif
+#else
         case AV_HWDEVICE_TYPE_CUDA:
             // CUDA should only be used to cover the NVIDIA+Wayland case
             return new CUDARenderer();

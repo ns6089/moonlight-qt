@@ -3,7 +3,8 @@
 #include "renderer.h"
 #include "swframemapper.h"
 
-#ifdef HAVE_CUDA
+#if defined HAVE_CUDA && !defined _WIN32
+#define USE_SDL_CUDA_INTEROP;
 #include "cuda.h"
 #endif
 
@@ -30,7 +31,7 @@ private:
 
     SwFrameMapper m_SwFrameMapper;
 
-#ifdef HAVE_CUDA
+#ifdef USE_SDL_CUDA_INTEROP
     CUDAGLInteropHelper* m_CudaGLHelper;
 #endif
 };

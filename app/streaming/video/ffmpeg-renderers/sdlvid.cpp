@@ -16,14 +16,14 @@ SdlRenderer::SdlRenderer()
 {
     SDL_zero(m_OverlayTextures);
 
-#ifdef HAVE_CUDA
+#ifdef USE_SDL_CUDA_INTEROP
     m_CudaGLHelper = nullptr;
 #endif
 }
 
 SdlRenderer::~SdlRenderer()
 {
-#ifdef HAVE_CUDA
+#ifdef USE_SDL_CUDA_INTEROP
     if (m_CudaGLHelper != nullptr) {
         delete m_CudaGLHelper;
     }
@@ -261,7 +261,7 @@ ReadbackRetry:
     // the texture when the colorspace changes.
     int colorspace = getFrameColorspace(frame);
     if (colorspace != m_ColorSpace) {
-#ifdef HAVE_CUDA
+#ifdef USE_SDL_CUDA_INTEROP
         if (m_CudaGLHelper != nullptr) {
             delete m_CudaGLHelper;
             m_CudaGLHelper = nullptr;
@@ -329,7 +329,7 @@ ReadbackRetry:
             goto Exit;
         }
 
-#ifdef HAVE_CUDA
+#ifdef USE_SDL_CUDA_INTEROP
         if (frame->format == AV_PIX_FMT_CUDA) {
             SDL_assert(m_CudaGLHelper == nullptr);
             m_CudaGLHelper = new CUDAGLInteropHelper(((AVHWFramesContext*)frame->hw_frames_ctx->data)->device_ctx);
@@ -346,7 +346,7 @@ ReadbackRetry:
     }
 
     if (frame->format == AV_PIX_FMT_CUDA) {
-#ifdef HAVE_CUDA
+#ifdef USE_SDL_CUDA_INTEROP
         if (m_CudaGLHelper == nullptr || !m_CudaGLHelper->copyCudaFrameToTextures(frame)) {
             goto ReadbackRetry;
         }
