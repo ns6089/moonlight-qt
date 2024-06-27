@@ -545,6 +545,13 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
             m_Pkt->data = (uint8_t*)k_AV1High10_444TestFrame;
             m_Pkt->size = sizeof(k_AV1High10_444TestFrame);
             break;
+        case VIDEO_FORMAT_AV1_MAIN10_444IN420:
+        case VIDEO_FORMAT_AV1_MAIN8_444IN420:
+        case VIDEO_FORMAT_H265_MAIN10_444IN420:
+        case VIDEO_FORMAT_H265_MAIN8_444IN420:
+        case VIDEO_FORMAT_H264_HIGH8_444IN420:
+            // TODO: can't do better for now
+            return true;
         default:
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "No test frame for format: %x",
@@ -701,12 +708,20 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         codecString = "H.264 4:4:4";
         break;
 
+    case VIDEO_FORMAT_H264_HIGH8_444IN420:
+        codecString = "H.264 4:4:4 in 4:2:0";
+        break;
+
     case VIDEO_FORMAT_H265:
         codecString = "HEVC";
         break;
 
     case VIDEO_FORMAT_H265_REXT8_444:
         codecString = "HEVC 4:4:4";
+        break;
+
+    case VIDEO_FORMAT_H265_MAIN8_444IN420:
+        codecString = "HEVC 4:4:4 in 4:2:0";
         break;
 
     case VIDEO_FORMAT_H265_MAIN10:
@@ -727,12 +742,25 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         }
         break;
 
+    case VIDEO_FORMAT_H265_MAIN10_444IN420:
+        if (LiGetCurrentHostDisplayHdrMode()) {
+            codecString = "HEVC 10-bit HDR 4:4:4 in 4:2:0";
+        }
+        else {
+            codecString = "HEVC 10-bit SDR 4:4:4 in 4:2:0";
+        }
+        break;
+
     case VIDEO_FORMAT_AV1_MAIN8:
         codecString = "AV1";
         break;
 
     case VIDEO_FORMAT_AV1_HIGH8_444:
         codecString = "AV1 4:4:4";
+        break;
+
+    case VIDEO_FORMAT_AV1_MAIN8_444IN420:
+        codecString = "AV1 4:4:4 in 4:2:0";
         break;
 
     case VIDEO_FORMAT_AV1_MAIN10:
@@ -750,6 +778,15 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         }
         else {
             codecString = "AV1 10-bit SDR 4:4:4";
+        }
+        break;
+
+    case VIDEO_FORMAT_AV1_MAIN10_444IN420:
+        if (LiGetCurrentHostDisplayHdrMode()) {
+            codecString = "AV1 10-bit HDR 4:4:4 in 4:2:0";
+        }
+        else {
+            codecString = "AV1 10-bit SDR 4:4:4 in 4:2:0";
         }
         break;
 
@@ -866,8 +903,8 @@ IFFmpegRenderer* FFmpegVideoDecoder::createHwAccelRenderer(const AVCodecHWConfig
 #ifdef Q_OS_WIN32
         // DXVA2 appears in the hwaccel list before D3D11VA, so we only check for D3D11VA
         // on the first pass to ensure we prefer D3D11VA over DXVA2.
-        case AV_HWDEVICE_TYPE_D3D11VA:
-            return new D3D11VARenderer(pass);
+//        case AV_HWDEVICE_TYPE_D3D11VA:
+//            return new D3D11VARenderer(pass);
 #endif
 #ifdef Q_OS_DARWIN
         case AV_HWDEVICE_TYPE_VIDEOTOOLBOX:
@@ -1293,6 +1330,10 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
                     // We only support YUV 4:4:4 decoding on Vulkan through libplacebo
                     continue;
                 }
+                if ((params->videoFormat & VIDEO_FORMAT_MASK_YUV444IN420) && config->device_type != AV_HWDEVICE_TYPE_VULKAN) {
+                    // We only support YUV 4:4:4 decoding on Vulkan through libplacebo
+                    continue;
+                }
 
                 // Initialize the hardware codec and submit a test frame if the renderer needs it
                 IFFmpegRenderer::InitFailureReason failureReason;
@@ -1381,6 +1422,10 @@ bool FFmpegVideoDecoder::initialize(PDECODER_PARAMETERS params)
 
                 // TODO: reexamine this
                 if ((params->videoFormat & VIDEO_FORMAT_MASK_YUV444) && config->device_type != AV_HWDEVICE_TYPE_VULKAN) {
+                    // We only support YUV 4:4:4 decoding on Vulkan through libplacebo
+                    continue;
+                }
+                if ((params->videoFormat & VIDEO_FORMAT_MASK_YUV444IN420) && config->device_type != AV_HWDEVICE_TYPE_VULKAN) {
                     // We only support YUV 4:4:4 decoding on Vulkan through libplacebo
                     continue;
                 }

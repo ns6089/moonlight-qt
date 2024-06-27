@@ -475,11 +475,17 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444) {
         videoFormat = VIDEO_FORMAT_AV1_HIGH10_444;
     }
+    else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10_444IN420) {
+        videoFormat = VIDEO_FORMAT_AV1_MAIN10_444IN420;
+    }
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10) {
         videoFormat = VIDEO_FORMAT_AV1_MAIN10;
     }
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH8_444) {
         videoFormat = VIDEO_FORMAT_AV1_HIGH8_444;
+    }
+    else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN8_444IN420) {
+        videoFormat = VIDEO_FORMAT_AV1_MAIN8_444IN420;
     }
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN8) {
         videoFormat = VIDEO_FORMAT_AV1_MAIN8;
@@ -487,17 +493,26 @@ bool Session::populateDecoderProperties(SDL_Window* window)
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT10_444) {
         videoFormat = VIDEO_FORMAT_H265_REXT10_444;
     }
+    else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN10_444IN420) {
+        videoFormat = VIDEO_FORMAT_H265_MAIN10_444IN420;
+    }
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN10) {
         videoFormat = VIDEO_FORMAT_H265_MAIN10;
     }
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_REXT8_444) {
         videoFormat = VIDEO_FORMAT_H265_REXT8_444;
     }
+    else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN8_444IN420) {
+        videoFormat = VIDEO_FORMAT_H265_MAIN8_444IN420;
+    }
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265) {
         videoFormat = VIDEO_FORMAT_H265;
     }
     else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H264_HIGH8_444) {
         videoFormat = VIDEO_FORMAT_H264_HIGH8_444;
+    }
+    else if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H264_HIGH8_444IN420) {
+        videoFormat = VIDEO_FORMAT_H264_HIGH8_444IN420;
     }
     else {
         videoFormat = VIDEO_FORMAT_H264;
@@ -719,6 +734,9 @@ bool Session::initialize()
         m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H264_HIGH8_444;
     }
     */
+    if (m_Preferences->enableYUV444) {
+        m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H264_HIGH8_444IN420;
+    }
 
     switch (m_Preferences->videoCodecConfig)
     {
@@ -778,6 +796,15 @@ bool Session::initialize()
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265;
         }
 
+        if (m_Preferences->enableYUV444) {
+            if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265) {
+                m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN8_444IN420;
+            }
+            if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_H265_MAIN10) {
+                m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10_444IN420;
+            }
+        }
+
 #ifdef Q_OS_DARWIN
         {
             // Prior to GFE 3.11, GFE did not allow us to constrain
@@ -804,10 +831,12 @@ bool Session::initialize()
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10;
             if (m_Preferences->enableYUV444) {
                 m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_REXT10_444;
+                m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN10_444IN420;
             }
         }
         if (m_Preferences->enableYUV444) {
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_REXT8_444;
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN8_444IN420;
         }
         break;
     case StreamingPreferences::VCC_FORCE_AV1:
@@ -816,10 +845,12 @@ bool Session::initialize()
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10;
             if (m_Preferences->enableYUV444) {
                 m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_HIGH10_444;
+                m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10_444IN420;
             }
         }
         if (m_Preferences->enableYUV444) {
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_HIGH8_444;
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN8_444IN420;
         }
 
         // We'll try to fall back to HEVC first if AV1 fails. We'd rather not fall back
@@ -835,6 +866,12 @@ bool Session::initialize()
         }
         if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_HIGH10_444) {
             m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_REXT10_444;
+        }
+        if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN8_444IN420) {
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_H265_MAIN8_444IN420;
+        }
+        if (m_StreamConfig.supportedVideoFormats & VIDEO_FORMAT_AV1_MAIN10_444IN420) {
+            m_StreamConfig.supportedVideoFormats |= VIDEO_FORMAT_AV1_MAIN10_444IN420;
         }
         break;
     }
@@ -1061,6 +1098,11 @@ bool Session::validateLaunch(SDL_Window* testWindow)
     }
 
     if (m_Preferences->enableYUV444) {
+        if (m_Preferences->preferYUV444In420) {
+            // TODO: Can't do better for now
+            m_StreamConfig.supportedVideoFormats &= ~VIDEO_FORMAT_MASK_YUV444;
+        }
+
         switch (m_Preferences->videoCodecConfig) {
         case StreamingPreferences::VCC_AUTO:
             // Auto was already checked during init

@@ -66,6 +66,9 @@ private:
     pl_swapchain_frame m_SwapchainFrame = {};
     bool m_HasPendingSwapchainFrame = false;
 
+    const struct pl_hook * m_recombine420Into444Shader = nullptr;
+    bool m_recombining420into444 = false;
+
     // Overlay state
     SDL_SpinLock m_OverlayLock = 0;
     struct {

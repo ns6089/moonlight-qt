@@ -14,6 +14,8 @@
 #include <vector>
 #include <set>
 
+#include "plvk_recombine.h"
+
 #ifndef VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME
 #define VK_KHR_VIDEO_DECODE_AV1_EXTENSION_NAME "VK_KHR_video_decode_av1"
 #endif
@@ -127,6 +129,11 @@ PlVkRenderer::~PlVkRenderer()
         for (int i = 0; i < (int)SDL_arraysize(m_Textures); i++) {
             pl_tex_destroy(m_Vulkan->gpu, &m_Textures[i]);
         }
+    }
+
+    if (m_recombine420Into444Shader) {
+        pl_mpv_user_shader_destroy(&m_recombine420Into444Shader);
+        m_recombine420Into444Shader = nullptr;
     }
 
     pl_renderer_destroy(&m_Renderer);
@@ -304,6 +311,10 @@ bool PlVkRenderer::tryInitializeDevice(VkPhysicalDevice device, VkPhysicalDevice
         return false;
     }
 
+    if (!m_recombine420Into444Shader) {
+        m_recombine420Into444Shader = pl_mpv_user_shader_parse(m_Vulkan->gpu, (char*)__plvk_recombine_glsl, __plvk_recombine_glsl_len);
+    }
+
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Vulkan rendering device chosen: %s",
                 deviceProps->deviceName);
@@ -400,6 +411,8 @@ bool PlVkRenderer::initialize(PDECODER_PARAMETERS params)
         (!(params->videoFormat & VIDEO_FORMAT_MASK_10BIT) || !chooseVulkanDevice(params, false))) {
         return false;
     }
+
+    m_recombining420into444 = (params->videoFormat & VIDEO_FORMAT_MASK_YUV444IN420);
 
     VkPresentModeKHR presentMode;
     if (params->enableVsync) {
@@ -757,7 +770,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     dst.h = targetFrame.crop.y1 - targetFrame.crop.y0;
 
     // Scale the video to the surface size while preserving the aspect ratio
-    StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
+    //StreamUtils::scaleSourceToDestinationSurface(&src, &dst);
 
     targetFrame.crop.x0 = dst.x;
     targetFrame.crop.y0 = dst.y;
@@ -767,7 +780,12 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     // Render the video image and overlays into the swapchain buffer
     targetFrame.num_overlays = (int)overlays.size();
     targetFrame.overlays = overlays.data();
-    if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &pl_render_fast_params)) {
+    pl_render_params render_params = pl_render_fast_params;
+    if (m_recombining420into444 && m_recombine420Into444Shader) {
+        render_params.hooks = &m_recombine420Into444Shader;
+        render_params.num_hooks = 1;
+    }
+    if (!pl_render_image(m_Renderer, &mappedFrame, &targetFrame, &render_params)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "pl_render_image() failed");
         // NB: We must fallthrough to call pl_swapchain_submit_frame()
@@ -903,7 +921,7 @@ bool PlVkRenderer::notifyWindowChanged(PWINDOW_STATE_CHANGE_INFO info)
 int PlVkRenderer::getRendererAttributes()
 {
     // This renderer supports HDR (including tone mapping to SDR displays)
-    return RENDERER_ATTRIBUTE_HDR_SUPPORT;
+    return RENDERER_ATTRIBUTE_HDR_SUPPORT | RENDERER_ATTRIBUTE_YUV444IN420_SUPPORT;
 }
 
 int PlVkRenderer::getDecoderColorspace()
